@@ -1,0 +1,4 @@
+interface:
+  display_name: "Yuque Notes"
+  short_description: "Operate Yuque notes via the local MCP project."
+  default_prompt: "Use $yuque-notes to record, update, search, or organize notes in Yuque."

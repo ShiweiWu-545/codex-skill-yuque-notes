@@ -1,0 +1,24 @@
+{
+  "skill": {
+    "name": "yuque-notes",
+    "source_dir": "skill"
+  },
+  "codex": {
+    "codex_home": "~/.codex"
+  },
+  "mcp": {
+    "server_name": "yuque-mcp",
+    "project_root": "../yuque-mcp-src",
+    "command": "python",
+    "args": [
+      "-m",
+      "yuque_mcp.server"
+    ],
+    "env": {
+      "YUQUE_SPACE_SUBDOMAIN": "www",
+      "DEFAULT_API_TOKEN": "<default_api_token>",
+      "DEFAULT_GROUP_LOGIN": "<default_group_login>",
+      "DEFAULT_BOOK_SLUG": "<default_book_slug>"
+    }
+  }
+}
