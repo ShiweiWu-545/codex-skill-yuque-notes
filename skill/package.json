@@ -1,0 +1,8 @@
+{
+  "name": "yuque-notes-skill",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "playwright-core": "^1.52.0"
+  }
+}

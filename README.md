@@ -1,22 +1,15 @@
 # codex-skill-yuque-notes
 
-`codex-skill-yuque-notes` 是一个面向 Codex 的公开 skill 仓库，用来把语雀笔记工作流接入到本地 Yuque MCP 服务。
+`codex-skill-yuque-notes` is a public Codex skill repository for operating Yuque notes.
 
-这个仓库包含两部分：
+It supports two workflows:
 
-- `skill/`：可安装到 `~/.codex/skills/yuque-notes` 的 skill 本体
-- `config/` + `scripts/`：用于安装 skill、生成 MCP 配置片段的模板和脚本
+- Browser workflow: reuse a logged-in Chrome profile and call Yuque through the web session, with no API token
+- API MCP workflow: connect to a local `yuque-mcp` project, which requires a Yuque API token
 
-## 能力范围
+For most personal use cases, the browser workflow is the default and recommended path.
 
-- 记录或覆盖笔记
-- 向已有笔记追加内容
-- 按标题或正文搜索笔记
-- 读取知识库目录结构
-- 按规则给出整理建议
-- 校验本地 Yuque MCP 项目是否可用
-
-## 仓库结构
+## Repository Layout
 
 ```text
 .
@@ -28,105 +21,113 @@
 |   `-- render_mcp_config.py
 |-- skill/
 |   |-- SKILL.md
+|   |-- package.json
 |   |-- agents/openai.yaml
 |   |-- references/
+|   |   |-- browser-setup.md
 |   |   |-- mcp-setup.md
 |   |   `-- operations.md
 |   `-- scripts/
 |       |-- check_local_project.py
-|       `-- print_mcp_config.py
+|       |-- print_mcp_config.py
+|       `-- yuque_browser_cli.js
 |-- .gitignore
 `-- LICENSE
 ```
 
-## 前置要求
+## Install The Skill
 
-- 已安装 Python 3.10 或更高版本
-- 已有一个可运行的本地 Yuque MCP 项目
-- 该本地项目至少包含：
-  - `pyproject.toml`
-  - `.env.example`
-  - `yuque_mcp/server.py`
-
-## 安装 skill
-
-1. 复制配置模板。
+1. Copy the config template.
 
 ```powershell
 Copy-Item .\config\install.example.json .\config\install.local.json
 ```
 
-2. 编辑 `config/install.local.json`。
+2. Edit `config/install.local.json`.
 
-至少确认这些字段：
+Important fields:
 
 - `skill.name`
 - `codex.codex_home`
-- `mcp.project_root`
-- `mcp.env.DEFAULT_API_TOKEN`
-- `mcp.env.DEFAULT_GROUP_LOGIN`
-- `mcp.env.DEFAULT_BOOK_SLUG`
+- `browser.repo_url`
+- `browser.chrome_user_data_dir`
+- `browser.chrome_profile_directory`
+- `install.install_node_dependencies`
 
-3. 安装 skill。
-
-Python 方式：
+3. Install the skill.
 
 ```powershell
 python .\scripts\install_skill.py --config .\config\install.local.json
 ```
 
-PowerShell 方式：
+or
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_skill.ps1 -ConfigPath .\config\install.local.json
 ```
 
-安装完成后，skill 会被复制到：
+By default, the installer copies the skill into:
 
 ```text
 %USERPROFILE%\.codex\skills\yuque-notes
 ```
 
-如果你设置了 `CODEX_HOME` 或在配置里改了 `codex_home`，目标目录会随之变化。
+If `install.install_node_dependencies` is `true`, the installer also runs:
 
-## 生成 MCP 配置
+```powershell
+npm install --omit=dev
+```
 
-执行：
+inside the installed skill directory, so `playwright-core` is available for the browser workflow.
+
+## Browser Workflow
+
+This path does not require a Yuque API token.
+
+Prerequisites:
+
+- Chrome is installed
+- Yuque is already logged in inside the target Chrome profile
+- All Chrome windows are closed before the script starts, otherwise the profile may stay locked
+
+Typical commands:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js inspect-session --repo-url https://www.yuque.com/superwu/ggooe2 --chrome-user-data-dir "%LOCALAPPDATA%\Google\Chrome\User Data" --chrome-profile-directory Default
+```
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js get-toc --repo-url https://www.yuque.com/superwu/ggooe2 --chrome-user-data-dir "%LOCALAPPDATA%\Google\Chrome\User Data" --chrome-profile-directory Default
+```
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js upsert-note --repo-url https://www.yuque.com/superwu/ggooe2 --chrome-user-data-dir "%LOCALAPPDATA%\Google\Chrome\User Data" --chrome-profile-directory Default --group-path "dev-tools" --doc-title "debug" --doc-body-file .\note.md
+```
+
+## API MCP Workflow
+
+This path is optional.
+
+Use it only when you explicitly want the token-based API integration. Generate the Codex MCP config snippet with:
 
 ```powershell
 python .\scripts\render_mcp_config.py --config .\config\install.local.json
 ```
 
-脚本会输出一个可直接粘贴到 Codex MCP 配置里的 `mcpServers` JSON 片段。
-
-如果本地 Yuque MCP 项目目录里已经有 `.env`，脚本会优先读取其中的值；没有时会回退到 `install.local.json` 里的占位值。
-
-## 校验本地 Yuque MCP 项目
-
-执行：
+## Publish
 
 ```powershell
-python .\skill\scripts\check_local_project.py --project-root <your-yuque-mcp-project>
-```
-
-如果返回里的 `is_ready` 为 `true`，说明本地项目已经满足 skill 的基本接入条件。
-
-## 发布到 GitHub
-
-```powershell
-git init -b main
 git add .
-git commit -m "Initial public release"
-git remote add origin <your-github-repo-url>
-git push -u origin main
+git commit -m "Update browser-first Yuque workflow"
+git push origin main
 ```
 
-发布前请确认没有提交以下内容：
+Do not commit:
 
 - `config/install.local.json`
-- 含真实 Token 的 `.env`
-- 你的本地语雀项目源码副本
+- `.env` files with real tokens
+- copied Chrome profile data
 
-## 许可证
+## License
 
-本仓库使用 [MIT License](LICENSE)。
+This repository uses the [MIT License](LICENSE).

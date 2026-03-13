@@ -1,5 +1,15 @@
 # Tool Routing
 
+## Browser Commands
+
+Map the same intents to the browser CLI when the user wants the logged-in Chrome workflow:
+
+- record or overwrite a note: `upsert-note`
+- append to an existing note: `append-note`
+- search notes: `search-notes`
+- inspect the repo catalog: `get-toc`
+- generate filing suggestions: `organize-notes`
+
 ## Preferred Flow
 
 1. Resolve the target catalog path with `get_yuque_repo_toc` if the user gives a visual location, partial path, or screenshot-based instruction.

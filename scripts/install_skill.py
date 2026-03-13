@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -33,6 +34,14 @@ def load_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def resolve_npm_executable() -> str:
+    for candidate in ("npm.cmd", "npm"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise FileNotFoundError("Unable to locate npm or npm.cmd in PATH.")
+
+
 def main() -> int:
     root = repo_root()
     parser = argparse.ArgumentParser(description="Install the yuque-notes skill.")
@@ -53,11 +62,24 @@ def main() -> int:
         shutil.rmtree(target_dir)
     shutil.copytree(source_dir, target_dir)
 
+    install_config = config.get("install", {})
+    should_install_node = bool(install_config.get("install_node_dependencies"))
+    package_json = target_dir / "package.json"
+    node_dependencies_installed = False
+    if should_install_node and package_json.exists():
+        subprocess.run(
+            [resolve_npm_executable(), "install", "--omit=dev"],
+            cwd=target_dir,
+            check=True,
+        )
+        node_dependencies_installed = True
+
     result = {
         "skill_name": skill_name,
         "source_dir": str(source_dir),
         "target_dir": str(target_dir),
         "config_path": str(config_path),
+        "node_dependencies_installed": node_dependencies_installed,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

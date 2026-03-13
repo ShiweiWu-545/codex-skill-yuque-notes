@@ -1,5 +1,7 @@
 # Local MCP Setup
 
+This path is optional. Use it only when the user has a Yuque API token and explicitly wants the API-based MCP flow.
+
 ## Find the Project
 
 Look for a local folder that contains all of the following:
