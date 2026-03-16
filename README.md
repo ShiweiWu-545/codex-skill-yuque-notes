@@ -4,7 +4,7 @@
 
 It supports two workflows:
 
-- Browser workflow: reuse a logged-in Chrome profile and call Yuque through the web session, with no API token
+- Browser workflow: reuse a saved Yuque browser `storageState` and call Yuque through the real web session, with no API token
 - API MCP workflow: connect to a local `yuque-mcp` project, which requires a Yuque API token
 
 For most personal use cases, the browser workflow is the default and recommended path.
@@ -30,7 +30,8 @@ For most personal use cases, the browser workflow is the default and recommended
 |   `-- scripts/
 |       |-- check_local_project.py
 |       |-- print_mcp_config.py
-|       `-- yuque_browser_cli.js
+|       |-- yuque_browser_cli.js
+|       `-- yuque_storage_state_login.js
 |-- .gitignore
 `-- LICENSE
 ```
@@ -50,9 +51,12 @@ Important fields:
 - `skill.name`
 - `codex.codex_home`
 - `browser.repo_url`
+- `install.install_node_dependencies`
+
+Optional fallback fields for the real Chrome profile route:
+
 - `browser.chrome_user_data_dir`
 - `browser.chrome_profile_directory`
-- `install.install_node_dependencies`
 
 3. Install the skill.
 
@@ -84,25 +88,73 @@ inside the installed skill directory, so `playwright-core` is available for the 
 
 This path does not require a Yuque API token.
 
-Prerequisites:
+### First-Time Login
 
-- Chrome is installed
-- Yuque is already logged in inside the target Chrome profile
-- All Chrome windows are closed before the script starts, otherwise the profile may stay locked
-
-Typical commands:
+Create a reusable storageState file:
 
 ```powershell
-node .\skill\scripts\yuque_browser_cli.js inspect-session --repo-url https://www.yuque.com/superwu/ggooe2 --chrome-user-data-dir "%LOCALAPPDATA%\Google\Chrome\User Data" --chrome-profile-directory Default
+node .\skill\scripts\yuque_storage_state_login.js --state-output .\.cache\yuque-state.json --repo-url <repo-url> [--username <value>] [--password <value>]
 ```
 
-```powershell
-node .\skill\scripts\yuque_browser_cli.js get-toc --repo-url https://www.yuque.com/superwu/ggooe2 --chrome-user-data-dir "%LOCALAPPDATA%\Google\Chrome\User Data" --chrome-profile-directory Default
-```
+You can also let the main CLI bootstrap it automatically:
 
 ```powershell
-node .\skill\scripts\yuque_browser_cli.js upsert-note --repo-url https://www.yuque.com/superwu/ggooe2 --chrome-user-data-dir "%LOCALAPPDATA%\Google\Chrome\User Data" --chrome-profile-directory Default --group-path "dev-tools" --doc-title "debug" --doc-body-file .\note.md
+node .\skill\scripts\yuque_browser_cli.js inspect-session --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json --ensure-login-if-missing true
 ```
+
+If `--storage-state-path` is omitted and `--ensure-login-if-missing true` is set, the CLI saves the state under:
+
+```text
+~/.codex/yuque-notes/storage-state/<group>__<book>.json
+```
+
+### Reuse The Saved State
+
+Inspect the repo session:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js inspect-session --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json
+```
+
+Read the TOC:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js get-toc --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json
+```
+
+Upsert a note:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js upsert-note --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json --group-path "dev-tools" --doc-title "debug" --doc-body-file .\note.md
+```
+
+Append to a note:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js append-note --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json --group-path "dev-tools" --doc-title "debug" --content-file .\append.md
+```
+
+### Refresh An Expired State
+
+If the saved state is no longer valid, rerun the same command with:
+
+```powershell
+--ensure-login-if-missing true
+```
+
+The CLI opens the manual-assisted login flow again, refreshes the state file, and retries the original action.
+
+### Fallback: Real Chrome Profile
+
+Use the real-profile route only when you explicitly want it and can close Chrome first:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js inspect-session --repo-url <repo-url> --chrome-user-data-dir "%LOCALAPPDATA%\Google\Chrome\User Data" --chrome-profile-directory Default
+```
+
+### Note About Controlled Chrome
+
+The manual login helper may start with a controlled browser window showing `about:blank` and the standard Chrome automation banner. That is expected and does not mean Yuque failed.
 
 ## API MCP Workflow
 
@@ -118,7 +170,7 @@ python .\scripts\render_mcp_config.py --config .\config\install.local.json
 
 ```powershell
 git add .
-git commit -m "Update browser-first Yuque workflow"
+git commit -m "Update Yuque storageState-first workflow"
 git push origin main
 ```
 
@@ -126,7 +178,8 @@ Do not commit:
 
 - `config/install.local.json`
 - `.env` files with real tokens
-- copied Chrome profile data
+- copied browser profile data
+- saved Yuque `storageState` files
 
 ## License
 

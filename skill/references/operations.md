@@ -2,23 +2,37 @@
 
 ## Browser Commands
 
-Map the same intents to the browser CLI when the user wants the logged-in Chrome workflow:
+Map note-management intents to the browser CLI when the user wants the Yuque web-session workflow:
 
 - record or overwrite a note: `upsert-note`
 - append to an existing note: `append-note`
 - search notes: `search-notes`
 - inspect the repo catalog: `get-toc`
 - generate filing suggestions: `organize-notes`
+- validate or bootstrap the current browser login state: `inspect-session`
 
-## Preferred Flow
+## Preferred Browser Flow
 
-1. Resolve the target catalog path with `get_yuque_repo_toc` if the user gives a visual location, partial path, or screenshot-based instruction.
-2. Choose the write tool based on intent.
-3. Only use the lower-level legacy tools when the specialized tools are not a fit.
+1. Start with `inspect-session`.
+2. If the storageState file is missing or the repo redirects to `/login`, rerun with `--ensure-login-if-missing true` or call `yuque_storage_state_login.js` directly.
+3. Run `get-toc` and resolve the exact `group_path` from `window.appData.book.toc`.
+4. Map `group_path` to the target catalog node UUID.
+5. Choose the write or search command that matches the user request.
+
+## Browser Implementation Rules
+
+- Browser mode reads the real repo page first and extracts `book_id` plus `toc` from `window.appData.book`.
+- Document listing, creation, and updates go through Yuque's frontend `/api/docs` endpoints.
+- New documents are inserted directly into the target catalog during creation with:
+  - `insert_to_catalog=true`
+  - `action=appendChild`
+  - `target_uuid=<catalog uuid>`
+- If a legacy `/api/v2/repos/...` route returns `401`, stop retrying that route and switch to the `/api/docs` browser flow.
+- `group_path` must resolve to an existing TOC node. If it does not, create the catalog manually first.
 
 ## Write Operations
 
-### `upsert_yuque_note`
+### `upsert-note`
 
 Use for:
 
@@ -34,10 +48,11 @@ Inputs:
 
 Behavior:
 
-- creates the note if it does not exist
-- updates the matching note when the same title already exists
+- updates the matching note only when the same title already exists in the exact target `group_path`
+- creates a new note in the target `group_path` when the same title only exists elsewhere
+- writes the new note directly into the target catalog during creation
 
-### `append_yuque_note`
+### `append-note`
 
 Use for:
 
@@ -51,9 +66,14 @@ Inputs:
 - `doc_title`
 - `content`
 
-## Search and Discovery
+Behavior:
 
-### `search_yuque_notes`
+- appends to the matching note in the exact target `group_path`
+- creates a new note in that `group_path` if no exact match exists there yet
+
+## Search And Discovery
+
+### `search-notes`
 
 Use for:
 
@@ -63,17 +83,17 @@ Use for:
 
 Prefer enabling both title and body search unless the user asks for exact title matching only.
 
-### `get_yuque_repo_toc`
+### `get-toc`
 
 Use for:
 
 - resolving folder names
 - confirming where a note should be created
-- inspecting whether a catalog node already exists
+- checking whether a catalog node already exists
 
 ## Organization
 
-### `organize_yuque_notes`
+### `organize-notes`
 
 Use for:
 
@@ -85,27 +105,13 @@ Important:
 - this produces recommendations
 - it does not move notes automatically
 
-## Lower-Level Tools
+## MCP-Only Lower-Level Tools
 
-### `create_yuque_group`
+These lower-level tools remain for the token-based MCP route:
 
-Use when the user explicitly wants to create a new catalog node.
+- `create_yuque_group`
+- `create_yuque_doc_in_group`
+- `get_yuque_doc_list`
+- `get_yuque_doc_detail`
 
-### `create_yuque_doc_in_group`
-
-Use when the user explicitly wants a plain create operation and does not want upsert semantics.
-
-### `get_yuque_doc_list`
-
-Use to inspect note lists or enumerate notes when search is not enough.
-
-### `get_yuque_doc_detail`
-
-Use to fetch one known note by `doc_id`.
-
-## Examples
-
-- Write a note into `dev-tools` with a stable title: use `upsert_yuque_note`
-- Add a log section to `debug`: use `append_yuque_note`
-- Find all notes mentioning `OpenAI`: use `search_yuque_notes`
-- Confirm whether `dev-tools/openai` exists: use `get_yuque_repo_toc`
+Use them only when the user explicitly chooses the API-token workflow.

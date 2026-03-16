@@ -1,4 +1,4 @@
 interface:
   display_name: "Yuque Notes"
-  short_description: "Operate Yuque notes via a logged-in Chrome profile or local MCP project."
-  default_prompt: "Use $yuque-notes to record, update, search, or organize notes in Yuque, preferring the logged-in Chrome workflow when no API token is available."
+  short_description: "Operate Yuque notes via a reusable browser storageState or local MCP project."
+  default_prompt: "Use $yuque-notes to record, update, search, or organize notes in Yuque, preferring the browser storageState workflow when no API token is available."

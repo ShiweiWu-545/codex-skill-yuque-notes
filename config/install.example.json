@@ -10,7 +10,7 @@
     "codex_home": "~/.codex"
   },
   "browser": {
-    "repo_url": "https://www.yuque.com/superwu/ggooe2",
+    "repo_url": "https://www.yuque.com/<group-login>/<book-slug>",
     "chrome_user_data_dir": "%LOCALAPPDATA%/Google/Chrome/User Data",
     "chrome_profile_directory": "Default",
     "channel": "chrome"

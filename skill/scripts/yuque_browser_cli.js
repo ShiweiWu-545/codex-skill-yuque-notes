@@ -1,21 +1,17 @@
 #!/usr/bin/env node
-/* Operate Yuque notes through a logged-in Chrome profile, without API tokens. */
+/* Operate Yuque notes through storageState or a logged-in Chrome profile. */
 
 const fs = require('fs');
-const os = require('os');
-const path = require('path');
 const { parseArgs } = require('node:util');
 
 const { chromium } = require('playwright-core');
 
-function expandPath(value) {
-  if (!value) {
-    return value;
-  }
-  let result = value.replace(/^~(?=$|[\\/])/, os.homedir());
-  result = result.replace(/%([^%]+)%/g, (_, key) => process.env[key] || `%${key}%`);
-  return path.resolve(result);
-}
+const {
+  defaultStorageStatePath,
+  expandPath,
+  loginWithManualAssist,
+  parseRepoUrl,
+} = require('./yuque_storage_state_login.js');
 
 function normalizeGroupPath(groupPath) {
   return String(groupPath || '')
@@ -160,17 +156,23 @@ function collectDocPaths(rawNodes) {
   return mapping;
 }
 
-function parseRepoUrl(repoUrl) {
-  const parsed = new URL(repoUrl);
-  const segments = parsed.pathname.split('/').filter(Boolean);
-  if (segments.length < 2) {
-    throw new Error(`Invalid Yuque repo URL: ${repoUrl}`);
+function findGroupNodeByPath(rawNodes, groupPath) {
+  const segments = splitGroupPath(groupPath);
+  if (!segments.length) {
+    return null;
   }
-  return {
-    repoUrl,
-    groupLogin: segments[0],
-    bookSlug: segments[1],
-  };
+
+  let searchNodes = buildTocTree(rawNodes);
+  let matchedNode = null;
+  for (const segment of segments) {
+    matchedNode =
+      searchNodes.find((node) => node.type === 'TITLE' && node.title === segment) || null;
+    if (!matchedNode) {
+      return null;
+    }
+    searchNodes = matchedNode.children || [];
+  }
+  return matchedNode;
 }
 
 function parseBoolean(value, defaultValue) {
@@ -185,6 +187,17 @@ function parseBoolean(value, defaultValue) {
     return false;
   }
   return defaultValue;
+}
+
+function parsePositiveInteger(value, fallbackValue) {
+  if (value === undefined || value === null || value === '') {
+    return fallbackValue;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid positive integer: ${value}`);
+  }
+  return Math.floor(parsed);
 }
 
 function readValueOrFile(value, filePath) {
@@ -206,26 +219,55 @@ function parseKeywordRules(rawValue, filePath) {
   return data;
 }
 
-async function launchContext(options) {
+function uniqueValues(values) {
+  return values.filter((value, index) => values.indexOf(value) === index);
+}
+
+function isLoginUrl(currentUrl) {
+  return String(currentUrl || '').includes('/login');
+}
+
+function shouldUseStorageState(values) {
+  return Boolean(values['storage-state-path'] || parseBoolean(values['ensure-login-if-missing'], false));
+}
+
+function resolveStorageStatePath(values, repoInfo) {
+  if (values['storage-state-path']) {
+    return expandPath(values['storage-state-path']);
+  }
+  if (parseBoolean(values['ensure-login-if-missing'], false)) {
+    return defaultStorageStatePath(repoInfo);
+  }
+  return null;
+}
+
+async function launchPersistentProfileContext(options) {
   const userDataDir = expandPath(
     options['chrome-user-data-dir'] || '%LOCALAPPDATA%/Google/Chrome/User Data',
   );
   const profileDirectory = options['chrome-profile-directory'] || 'Default';
-  const channelPreference = options.channel || 'chrome';
-  const browserChannels = [channelPreference, 'chrome', 'msedge', undefined].filter(
-    (value, index, array) => array.indexOf(value) === index,
-  );
+  const browserChannels = uniqueValues([options.channel || 'chrome', 'chrome', 'msedge', undefined]);
 
   let lastError = null;
   for (const channel of browserChannels) {
     try {
-      return await chromium.launchPersistentContext(userDataDir, {
+      const context = await chromium.launchPersistentContext(userDataDir, {
         channel,
         headless: false,
         args: [`--profile-directory=${profileDirectory}`],
         locale: 'zh-CN',
         viewport: { width: 1440, height: 900 },
       });
+      const page = context.pages()[0] || (await context.newPage());
+      return {
+        workflow: 'chrome-profile',
+        context,
+        page,
+        browser: null,
+        browser_channel: channel || 'chromium',
+        chrome_user_data_dir: userDataDir,
+        chrome_profile_directory: profileDirectory,
+      };
     } catch (error) {
       lastError = error;
     }
@@ -236,51 +278,140 @@ async function launchContext(options) {
   );
 }
 
-async function ensureRepoPage(page, repoUrl) {
-  await page.goto(repoUrl, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(3000);
+async function launchStorageStateContext(options, storageStatePath) {
+  const browserChannels = uniqueValues([options.channel || 'chrome', 'chrome', 'msedge', undefined]);
+  let lastError = null;
+
+  for (const channel of browserChannels) {
+    try {
+      const browser = await chromium.launch({
+        channel,
+        headless: false,
+      });
+      const context = await browser.newContext({
+        storageState: storageStatePath,
+        locale: 'zh-CN',
+        viewport: { width: 1440, height: 900 },
+      });
+      const page = await context.newPage();
+      return {
+        workflow: 'storage-state',
+        browser,
+        context,
+        page,
+        browser_channel: channel || 'chromium',
+        storage_state_path: storageStatePath,
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(
+    `Unable to launch a browser with storageState '${storageStatePath}'. ${lastError ? lastError.message : ''}`.trim(),
+  );
+}
+
+async function closeSession(session) {
+  if (!session) {
+    return;
+  }
+  if (session.context) {
+    await session.context.close().catch(() => {});
+  }
+  if (session.browser) {
+    await session.browser.close().catch(() => {});
+  }
+}
+
+async function readRepoState(page, repoInfo) {
+  await page.goto(repoInfo.repoUrl, { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(2500);
 
   const currentUrl = page.url();
   const title = await page.title();
-  if (currentUrl.includes('/login') || title.includes('登录')) {
-    throw new Error(
-      `The selected Chrome profile is not logged into Yuque for ${repoUrl}. Open the same profile, log into Yuque, close Chrome, and retry.`,
-    );
+  if (isLoginUrl(currentUrl)) {
+    const error = new Error(`Repo access redirected to /login: ${repoInfo.repoUrl}`);
+    error.code = 'YUQUE_LOGIN_REQUIRED';
+    error.current_url = currentUrl;
+    error.title = title;
+    throw error;
   }
-  return { url: currentUrl, title };
+
+  await page
+    .waitForFunction(() => {
+      const appData = window.appData || {};
+      const book = appData.book || appData.repo || {};
+      return Boolean(book.id || book.book_id || book.bookId);
+    }, { timeout: 15000 })
+    .catch(() => {});
+
+  const appState = await page.evaluate(() => {
+    const appData = window.appData || {};
+    const book = appData.book || appData.repo || {};
+    return {
+      login: appData.me?.login || appData.user?.login || book.user?.login || null,
+      book_id: book.id ?? book.book_id ?? book.bookId ?? null,
+      book_name: book.name || book.title || '',
+      book_slug: book.slug || '',
+      toc: Array.isArray(book.toc) ? book.toc : Array.isArray(appData.toc) ? appData.toc : [],
+    };
+  });
+
+  if (!appState.book_id) {
+    throw new Error(`Unable to read book_id from window.appData.book for ${repoInfo.repoUrl}.`);
+  }
+
+  return {
+    repo_url: repoInfo.repoUrl,
+    current_url: currentUrl,
+    title,
+    login: appState.login,
+    book_id: appState.book_id,
+    book_name: appState.book_name,
+    book_slug: appState.book_slug,
+    toc: appState.toc,
+  };
 }
 
-async function apiRequest(page, apiPath, { method = 'GET', query = null, body = null } = {}) {
+async function buildRequestHeaders(page, repoState) {
+  const cookies = await page.context().cookies('https://www.yuque.com');
+  const csrfToken = cookies.find((item) => item.name === 'yuque_ctoken')?.value || '';
+  const headers = {
+    accept: 'application/json',
+    'x-requested-with': 'XMLHttpRequest',
+  };
+  if (repoState.login) {
+    headers['x-login'] = repoState.login;
+  }
+  if (csrfToken) {
+    headers['x-csrf-token'] = csrfToken;
+  }
+  return headers;
+}
+
+async function frontendRequest(page, repoState, apiPath, { method = 'GET', query = null, body = null } = {}) {
+  const headers = await buildRequestHeaders(page, repoState);
+  if (body !== null) {
+    headers['content-type'] = 'application/json';
+  }
+
   const result = await page.evaluate(
-    async ({ apiPath: inApiPath, method: inMethod, query: inQuery, body: inBody }) => {
-      let finalPath = inApiPath;
-      if (inQuery && Object.keys(inQuery).length) {
-        const searchParams = new URLSearchParams();
-        for (const [key, value] of Object.entries(inQuery)) {
+    async ({ apiPath: rawPath, method: rawMethod, query: rawQuery, body: rawBody, headers: rawHeaders }) => {
+      const finalUrl = new URL(rawPath, window.location.origin);
+      if (rawQuery && typeof rawQuery === 'object') {
+        for (const [key, value] of Object.entries(rawQuery)) {
           if (value !== undefined && value !== null && value !== '') {
-            searchParams.set(key, String(value));
+            finalUrl.searchParams.set(key, String(value));
           }
         }
-        const queryString = searchParams.toString();
-        if (queryString) {
-          finalPath = `${finalPath}?${queryString}`;
-        }
       }
 
-      const headers = {};
-      const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
-      if (csrf) {
-        headers['x-csrf-token'] = csrf;
-      }
-      if (inBody !== null) {
-        headers['content-type'] = 'application/json';
-      }
-
-      const response = await fetch(finalPath, {
-        method: inMethod,
+      const response = await fetch(finalUrl.toString(), {
+        method: rawMethod,
         credentials: 'include',
-        headers,
-        body: inBody === null ? undefined : JSON.stringify(inBody),
+        headers: rawHeaders,
+        body: rawBody === null ? undefined : JSON.stringify(rawBody),
       });
       const text = await response.text();
       let data;
@@ -293,43 +424,41 @@ async function apiRequest(page, apiPath, { method = 'GET', query = null, body = 
         ok: response.ok,
         status: response.status,
         data,
+        text,
       };
     },
-    { apiPath, method, query, body },
+    { apiPath, method, query, body, headers },
   );
 
   if (!result.ok) {
-    throw new Error(`Yuque browser request failed: ${method} ${apiPath} -> ${result.status}`);
+    const bodyText = typeof result.text === 'string' ? result.text.slice(0, 300) : '';
+    const error = new Error(
+      `Yuque frontend request failed: ${method} ${apiPath} -> ${result.status}${bodyText ? ` ${bodyText}` : ''}`,
+    );
+    error.code = result.status === 401 ? 'YUQUE_UNAUTHORIZED' : 'YUQUE_REQUEST_FAILED';
+    error.status = result.status;
+    throw error;
   }
 
   return result.data;
 }
 
-function makeRepoApiBase(repoInfo) {
-  return `/api/v2/repos/${repoInfo.groupLogin}/${repoInfo.bookSlug}`;
-}
-
-async function getRepoToc(page, repoInfo) {
-  const data = await apiRequest(page, `${makeRepoApiBase(repoInfo)}/toc`);
-  return data.data || [];
-}
-
-async function listDocs(page, repoInfo, offset, limit) {
-  const data = await apiRequest(page, `${makeRepoApiBase(repoInfo)}/docs`, {
+async function listDocs(page, repoState, offset, limit) {
+  const data = await frontendRequest(page, repoState, '/api/docs', {
     query: {
+      book_id: repoState.book_id,
       offset,
       limit,
-      optional_properties: 'hits,tags,latest_version_id,description,updated_at,slug',
     },
   });
   return data.data || [];
 }
 
-async function listAllDocs(page, repoInfo, batchSize = 100) {
+async function listAllDocs(page, repoState, batchSize = 100) {
   const items = [];
   let offset = 0;
   while (true) {
-    const batch = await listDocs(page, repoInfo, offset, batchSize);
+    const batch = await listDocs(page, repoState, offset, batchSize);
     if (!batch.length) {
       break;
     }
@@ -342,116 +471,213 @@ async function listAllDocs(page, repoInfo, batchSize = 100) {
   return items;
 }
 
-async function getDoc(page, repoInfo, docId) {
-  const data = await apiRequest(page, `${makeRepoApiBase(repoInfo)}/docs/${docId}`);
-  return data.data || {};
-}
-
-async function createDoc(page, repoInfo, title, body) {
-  const data = await apiRequest(page, `${makeRepoApiBase(repoInfo)}/docs`, {
-    method: 'POST',
-    body: {
-      title,
-      body,
-      format: 'markdown',
-      public: 0,
-    },
-  });
-  return data.data || {};
-}
-
-async function updateDoc(page, repoInfo, docId, title, body) {
-  const payload = {};
-  if (title) {
-    payload.title = title;
+function resolveDocRef(docRef) {
+  if (docRef && typeof docRef === 'object') {
+    return {
+      id: docRef.id,
+      slug: docRef.slug || null,
+    };
   }
-  if (body) {
-    payload.body = body;
-    payload.format = 'markdown';
-  }
-  const data = await apiRequest(page, `${makeRepoApiBase(repoInfo)}/docs/${docId}`, {
-    method: 'PUT',
-    body: payload,
-  });
-  return data.data || {};
-}
-
-async function createGroup(page, repoInfo, title, parentUuid) {
-  const payload = {
-    action: 'appendNode',
-    action_mode: 'child',
-    type: 'TITLE',
-    title,
-    visible: 1,
+  return {
+    id: docRef,
+    slug: null,
   };
-  if (parentUuid) {
-    payload.target_uuid = parentUuid;
-  }
-  const data = await apiRequest(page, `${makeRepoApiBase(repoInfo)}/toc`, {
-    method: 'PUT',
-    body: payload,
-  });
-  if (Array.isArray(data.data)) {
-    return data.data[data.data.length - 1] || {};
-  }
-  return data.data || {};
 }
 
-async function appendDocToGroup(page, repoInfo, groupUuid, docId) {
-  const data = await apiRequest(page, `${makeRepoApiBase(repoInfo)}/toc`, {
-    method: 'PUT',
-    body: {
-      action: 'appendNode',
-      action_mode: 'child',
-      target_uuid: groupUuid,
-      type: 'DOC',
-      doc_ids: [docId],
-      visible: 1,
-    },
-  });
-  return data.data || {};
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-async function ensureGroupPath(page, repoInfo, groupPath) {
-  const segments = splitGroupPath(groupPath);
-  if (!segments.length) {
-    return { uuid: null, path: '', created: [] };
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"');
+}
+
+function stripHtml(value) {
+  return compactText(
+    decodeHtmlEntities(
+      String(value || '')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<(br|\/p|\/div|\/li|\/ul|\/ol|\/pre|\/h[1-6])\s*\/?>/gi, '\n')
+        .replace(/<[^>]+>/g, ' '),
+    ),
+  );
+}
+
+function buildLakeTextNode(text) {
+  return `<span class="ne-text">${escapeHtml(text)}</span>`;
+}
+
+function buildLakeFragment(markdown) {
+  const normalized = String(markdown || '').replace(/\r\n/g, '\n').trim();
+  if (!normalized) {
+    return '';
   }
 
-  const created = [];
-  let parentUuid = null;
+  const blocks = normalized.split(/\n{2,}/).filter(Boolean);
+  const htmlBlocks = [];
 
-  for (let index = 0; index < segments.length; index += 1) {
-    const currentSegment = segments[index];
-    const toc = await getRepoToc(page, repoInfo);
-    const roots = buildTocTree(toc);
-    let searchNodes = roots;
-    let matchedNode = null;
-
-    for (const segment of segments.slice(0, index + 1)) {
-      matchedNode =
-        searchNodes.find((node) => node.type === 'TITLE' && node.title === segment) || null;
-      if (!matchedNode) {
-        break;
-      }
-      searchNodes = matchedNode.children || [];
-    }
-
-    if (matchedNode) {
-      parentUuid = matchedNode.uuid || null;
+  for (const block of blocks) {
+    const lines = block.split('\n').filter((line) => line.trim() !== '');
+    if (!lines.length) {
       continue;
     }
 
-    const createdNode = await createGroup(page, repoInfo, currentSegment, parentUuid);
-    created.push(segments.slice(0, index + 1).join('/'));
-    parentUuid = createdNode.uuid || null;
+    if (lines[0].startsWith('```') && lines[lines.length - 1].startsWith('```')) {
+      const code = lines.slice(1, -1).join('\n');
+      htmlBlocks.push(`<pre><code>${escapeHtml(code)}</code></pre>`);
+      continue;
+    }
+
+    if (lines.every((line) => /^#{1,6}\s+/.test(line))) {
+      for (const line of lines) {
+        const match = line.match(/^(#{1,6})\s+(.*)$/);
+        const level = match ? match[1].length : 1;
+        const text = match ? match[2] : line;
+        htmlBlocks.push(`<h${level}>${buildLakeTextNode(text)}</h${level}>`);
+      }
+      continue;
+    }
+
+    if (lines.every((line) => /^[-*]\s+/.test(line))) {
+      const items = lines
+        .map((line) => line.replace(/^[-*]\s+/, ''))
+        .map((line) => `<li>${buildLakeTextNode(line)}</li>`)
+        .join('');
+      htmlBlocks.push(`<ul class="ne-ul">${items}</ul>`);
+      continue;
+    }
+
+    if (lines.every((line) => /^\d+\.\s+/.test(line))) {
+      const items = lines
+        .map((line) => line.replace(/^\d+\.\s+/, ''))
+        .map((line) => `<li>${buildLakeTextNode(line)}</li>`)
+        .join('');
+      htmlBlocks.push(`<ol class="ne-ol">${items}</ol>`);
+      continue;
+    }
+
+    htmlBlocks.push(
+      `<p>${lines.map((line) => buildLakeTextNode(line)).join('<br />')}</p>`,
+    );
   }
 
-  return { uuid: parentUuid, path: segments.join('/'), created };
+  return htmlBlocks.join('');
+}
+
+function appendLakeBody(existingBody, markdown) {
+  const fragment = buildLakeFragment(markdown);
+  if (!fragment) {
+    return existingBody;
+  }
+
+  const current = String(existingBody || '');
+  if (!current) {
+    return `<!doctype html><div class="lake-content" typography="classic">${fragment}</div>`;
+  }
+
+  const closingIndex = current.lastIndexOf('</div>');
+  if (closingIndex >= 0) {
+    return `${current.slice(0, closingIndex)}${fragment}${current.slice(closingIndex)}`;
+  }
+  return `${current}${fragment}`;
+}
+
+function extractSearchableBody(detail) {
+  const candidates = [
+    detail.body,
+    detail.body_draft,
+    detail.content,
+    detail.body_asl,
+    detail.description,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || !candidate.trim()) {
+      continue;
+    }
+    if (/<[^>]+>/.test(candidate) || candidate.startsWith('<!doctype')) {
+      return stripHtml(candidate);
+    }
+    return compactText(candidate);
+  }
+
+  return '';
+}
+
+async function getDoc(page, repoState, docRef, options = {}) {
+  const { id, slug } = resolveDocRef(docRef);
+  const lookup = slug || id;
+  const query = options.editable
+    ? {
+        book_id: repoState.book_id,
+        mode: 'edit',
+        include_contributors: true,
+        include_like: true,
+        include_hits: true,
+        merge_dynamic_data: false,
+        forceLocal: false,
+      }
+    : {
+        book_id: repoState.book_id,
+      };
+
+  const data = await frontendRequest(page, repoState, `/api/docs/${lookup}`, {
+    query,
+  });
+  return data.data || {};
+}
+
+async function createDoc(page, repoState, title, body, targetUuid) {
+  const payload = {
+    book_id: repoState.book_id,
+    title,
+    body,
+    format: 'markdown',
+    public: 0,
+  };
+  if (targetUuid) {
+    payload.insert_to_catalog = true;
+    payload.action = 'appendChild';
+    payload.target_uuid = targetUuid;
+  }
+  const data = await frontendRequest(page, repoState, '/api/docs', {
+    method: 'POST',
+    body: payload,
+  });
+  return data.data || {};
+}
+
+async function updateDoc(page, repoState, docId, { title, body, format }) {
+  const payload = {};
+  if (title !== undefined && title !== null && title !== '') {
+    payload.title = title;
+  }
+  if (body !== undefined && body !== null) {
+    payload.body = body;
+    payload.format = format || 'markdown';
+  }
+  const data = await frontendRequest(page, repoState, `/api/docs/${docId}`, {
+    method: 'PUT',
+    body: payload,
+  });
+  return data.data || {};
 }
 
 function findDocForUpsert(docs, title, groupPath, docPathMap) {
   const wanted = String(title || '').trim().toLowerCase();
+  const normalizedTarget = normalizeGroupPath(groupPath);
   const candidates = docs.filter(
     (item) => String(item.title || '').trim().toLowerCase() === wanted,
   );
@@ -462,145 +688,254 @@ function findDocForUpsert(docs, title, groupPath, docPathMap) {
   const byUpdatedAt = (left, right) =>
     String(right.updated_at || '').localeCompare(String(left.updated_at || ''));
 
-  if (!groupPath) {
-    return candidates.sort(byUpdatedAt)[0];
-  }
-
-  const normalizedTarget = normalizeGroupPath(groupPath);
   const matching = candidates.filter((item) => {
     const paths = (docPathMap[String(item.id)] || []).map((value) => normalizeGroupPath(value));
     return paths.includes(normalizedTarget);
   });
-  if (matching.length) {
-    return matching.sort(byUpdatedAt)[0];
-  }
-  return candidates.sort(byUpdatedAt)[0];
-}
 
-async function inspectSession(page, repoInfo) {
-  const current = await ensureRepoPage(page, repoInfo.repoUrl);
-  return {
-    ok: true,
-    repo_url: repoInfo.repoUrl,
-    current_url: current.url,
-    title: current.title,
-  };
-}
-
-async function getTocAction(page, repoInfo) {
-  await ensureRepoPage(page, repoInfo.repoUrl);
-  const rawNodes = await getRepoToc(page, repoInfo);
-  return {
-    repo_url: repoInfo.repoUrl,
-    roots: buildTocTree(rawNodes),
-    doc_paths: collectDocPaths(rawNodes),
-  };
-}
-
-async function upsertNoteAction(page, repoInfo, options) {
-  await ensureRepoPage(page, repoInfo.repoUrl);
-  const groupPath = normalizeGroupPath(options['group-path'] || '');
-  const docTitle = options['doc-title'];
-  const docBody = readValueOrFile(options['doc-body'], options['doc-body-file']);
-
-  if (!docTitle) {
-    throw new Error('Missing --doc-title');
+  if (!matching.length) {
+    return null;
   }
 
-  const targetGroup = groupPath
-    ? await ensureGroupPath(page, repoInfo, groupPath)
-    : { uuid: null, path: '' };
-  const toc = await getRepoToc(page, repoInfo);
-  const docs = await listAllDocs(page, repoInfo);
-  const docPathMap = collectDocPaths(toc);
-  const existing = findDocForUpsert(docs, docTitle, groupPath, docPathMap);
+  return matching.sort(byUpdatedAt)[0];
+}
 
-  if (!existing) {
-    const created = await createDoc(page, repoInfo, docTitle, docBody);
-    let attached = false;
-    if (targetGroup.uuid && created.id !== undefined && created.id !== null) {
-      await appendDocToGroup(page, repoInfo, targetGroup.uuid, created.id);
-      attached = true;
-    }
-    return {
-      action: 'created',
-      doc: created,
-      group: targetGroup,
-      attached_to_group: attached,
-    };
+function resolveTargetGroup(rawToc, groupPath) {
+  const normalized = normalizeGroupPath(groupPath);
+  if (!normalized) {
+    return { uuid: null, path: '' };
   }
-
-  const updated = await updateDoc(page, repoInfo, existing.id, docTitle, docBody);
-  let attached = false;
-  if (targetGroup.uuid) {
-    const latestToc = await getRepoToc(page, repoInfo);
-    const latestPaths = collectDocPaths(latestToc);
-    const currentPaths = (latestPaths[String(existing.id)] || []).map((value) =>
-      normalizeGroupPath(value),
+  const groupNode = findGroupNodeByPath(rawToc, normalized);
+  if (!groupNode || !groupNode.uuid) {
+    throw new Error(
+      `Target group path '${normalized}' was not found in the current TOC. Run get-toc first and create the catalog manually if needed.`,
     );
-    if (!currentPaths.includes(groupPath)) {
-      await appendDocToGroup(page, repoInfo, targetGroup.uuid, existing.id);
-      attached = true;
-    }
   }
   return {
-    action: 'updated',
-    doc: updated || existing,
-    group: targetGroup,
-    attached_to_group: attached,
+    uuid: groupNode.uuid,
+    path: normalized,
+    title: groupNode.title,
   };
 }
 
-async function appendNoteAction(page, repoInfo, options) {
-  await ensureRepoPage(page, repoInfo.repoUrl);
-  const groupPath = normalizeGroupPath(options['group-path'] || '');
-  const docTitle = options['doc-title'];
-  const content = readValueOrFile(options.content, options['content-file']);
-  const separator = options.separator || '\n\n';
+function buildSessionMetadata(session, repoState) {
+  const data = {
+    workflow: session.workflow,
+    repo_url: repoState.repo_url,
+    current_url: repoState.current_url,
+    title: repoState.title,
+    book_id: repoState.book_id,
+    book_name: repoState.book_name,
+    book_slug: repoState.book_slug,
+  };
+  if (session.storage_state_path) {
+    data.storage_state_path = session.storage_state_path;
+  }
+  if (session.chrome_user_data_dir) {
+    data.chrome_user_data_dir = session.chrome_user_data_dir;
+  }
+  if (session.chrome_profile_directory) {
+    data.chrome_profile_directory = session.chrome_profile_directory;
+  }
+  data.browser_channel = session.browser_channel;
+  return data;
+}
 
-  if (!docTitle) {
-    throw new Error('Missing --doc-title');
+async function prepareStorageStateSession(values, repoInfo) {
+  const storageStatePath = resolveStorageStatePath(values, repoInfo);
+  const ensureLoginIfMissing = parseBoolean(values['ensure-login-if-missing'], false);
+  const loginTimeoutSeconds = parsePositiveInteger(values['login-timeout-seconds'], 300);
+
+  if (!storageStatePath) {
+    throw new Error('Missing storage state path.');
   }
 
-  const toc = await getRepoToc(page, repoInfo);
-  const docs = await listAllDocs(page, repoInfo);
-  const existing = findDocForUpsert(docs, docTitle, groupPath, collectDocPaths(toc));
-
-  if (!existing) {
-    return upsertNoteAction(page, repoInfo, {
-      'group-path': groupPath,
-      'doc-title': docTitle,
-      'doc-body': content,
+  if (!fs.existsSync(storageStatePath)) {
+    if (!ensureLoginIfMissing) {
+      throw new Error(
+        `Storage state file not found: ${storageStatePath}. Pass --ensure-login-if-missing true to create one interactively.`,
+      );
+    }
+    await loginWithManualAssist({
+      stateOutput: storageStatePath,
+      repoUrl: repoInfo.repoUrl,
+      username: values.username,
+      password: values.password,
+      timeoutSeconds: loginTimeoutSeconds,
+      channel: values.channel,
+      log: console.error,
     });
   }
 
-  const detail = await getDoc(page, repoInfo, existing.id);
-  const currentBody = detail.body || '';
-  const nextBody = currentBody ? `${currentBody}${separator}${content}` : content;
-  const updated = await updateDoc(page, repoInfo, existing.id, '', nextBody);
+  let session = await launchStorageStateContext(values, storageStatePath);
+  try {
+    const repoState = await readRepoState(session.page, repoInfo);
+    return { ...session, repoState };
+  } catch (error) {
+    await closeSession(session);
+    if (error.code !== 'YUQUE_LOGIN_REQUIRED' || !ensureLoginIfMissing) {
+      throw error;
+    }
+
+    await loginWithManualAssist({
+      stateOutput: storageStatePath,
+      repoUrl: repoInfo.repoUrl,
+      username: values.username,
+      password: values.password,
+      timeoutSeconds: loginTimeoutSeconds,
+      channel: values.channel,
+      log: console.error,
+    });
+
+    session = await launchStorageStateContext(values, storageStatePath);
+    try {
+      const repoState = await readRepoState(session.page, repoInfo);
+      return { ...session, repoState };
+    } catch (refreshError) {
+      await closeSession(session);
+      throw refreshError;
+    }
+  }
+}
+
+async function prepareProfileSession(values, repoInfo) {
+  const session = await launchPersistentProfileContext(values);
+  try {
+    const repoState = await readRepoState(session.page, repoInfo);
+    return { ...session, repoState };
+  } catch (error) {
+    await closeSession(session);
+    if (error.code === 'YUQUE_LOGIN_REQUIRED') {
+      throw new Error(
+        `The selected Chrome profile is not logged into Yuque for ${repoInfo.repoUrl}. Log into Yuque in that profile, close Chrome, and retry.`,
+      );
+    }
+    throw error;
+  }
+}
+
+async function prepareSession(values, repoInfo) {
+  if (shouldUseStorageState(values)) {
+    return prepareStorageStateSession(values, repoInfo);
+  }
+  return prepareProfileSession(values, repoInfo);
+}
+
+async function inspectSessionAction(session) {
   return {
+    ok: true,
+    ...buildSessionMetadata(session, session.repoState),
+  };
+}
+
+async function getTocAction(session) {
+  return {
+    ...buildSessionMetadata(session, session.repoState),
+    roots: buildTocTree(session.repoState.toc),
+    doc_paths: collectDocPaths(session.repoState.toc),
+  };
+}
+
+async function upsertNoteAction(session, values) {
+  const repoState = session.repoState;
+  const groupPath = normalizeGroupPath(values['group-path'] || '');
+  const docTitle = values['doc-title'];
+  const docBody = readValueOrFile(values['doc-body'], values['doc-body-file']);
+
+  if (!docTitle) {
+    throw new Error('Missing --doc-title');
+  }
+
+  const targetGroup = resolveTargetGroup(repoState.toc, groupPath);
+  const docs = await listAllDocs(session.page, repoState);
+  const docPathMap = collectDocPaths(repoState.toc);
+  const existing = findDocForUpsert(docs, docTitle, groupPath, docPathMap);
+
+  if (!existing) {
+    const created = await createDoc(session.page, repoState, docTitle, docBody, targetGroup.uuid);
+    return {
+      ...buildSessionMetadata(session, repoState),
+      action: 'created',
+      group: targetGroup,
+      doc: created,
+    };
+  }
+
+  const updated = await updateDoc(session.page, repoState, existing.id, {
+    title: docTitle,
+    body: docBody,
+  });
+  return {
+    ...buildSessionMetadata(session, repoState),
+    action: 'updated',
+    group: targetGroup,
+    doc: updated || existing,
+  };
+}
+
+async function appendNoteAction(session, values) {
+  const repoState = session.repoState;
+  const groupPath = normalizeGroupPath(values['group-path'] || '');
+  const docTitle = values['doc-title'];
+  const content = readValueOrFile(values.content, values['content-file']);
+  const separator = values.separator || '\n\n';
+
+  if (!docTitle) {
+    throw new Error('Missing --doc-title');
+  }
+
+  const targetGroup = resolveTargetGroup(repoState.toc, groupPath);
+  const docs = await listAllDocs(session.page, repoState);
+  const existing = findDocForUpsert(docs, docTitle, groupPath, collectDocPaths(repoState.toc));
+
+  if (!existing) {
+    const created = await createDoc(session.page, repoState, docTitle, content, targetGroup.uuid);
+    return {
+      ...buildSessionMetadata(session, repoState),
+      action: 'created',
+      group: targetGroup,
+      doc: created,
+    };
+  }
+
+  const detail = await getDoc(session.page, repoState, existing, { editable: true });
+  const currentBody = detail.body || '';
+  const usesLakeFormat =
+    detail.format === 'lake' || detail.origin_format === 'lake' || /<[^>]+>/.test(currentBody);
+  const nextBody = usesLakeFormat
+    ? appendLakeBody(currentBody, content)
+    : currentBody
+      ? `${currentBody}${separator}${content}`
+      : content;
+  const updated = await updateDoc(session.page, repoState, existing.id, {
+    body: nextBody,
+    format: usesLakeFormat ? 'lake' : 'markdown',
+  });
+
+  return {
+    ...buildSessionMetadata(session, repoState),
     action: 'appended',
+    group: targetGroup,
     doc: updated || existing,
     previous_length: currentBody.length,
     new_length: nextBody.length,
   };
 }
 
-async function searchNotesAction(page, repoInfo, options) {
-  await ensureRepoPage(page, repoInfo.repoUrl);
-  const keyword = options.keyword || '';
-  const groupPath = normalizeGroupPath(options['group-path'] || '');
-  const searchInTitle = parseBoolean(options['search-in-title'], true);
-  const searchInBody = parseBoolean(options['search-in-body'], true);
-  const limit = Number(options.limit || 10);
+async function searchNotesAction(session, values) {
+  const repoState = session.repoState;
+  const keyword = values.keyword || '';
+  const groupPath = normalizeGroupPath(values['group-path'] || '');
+  const searchInTitle = parseBoolean(values['search-in-title'], true);
+  const searchInBody = parseBoolean(values['search-in-body'], true);
+  const limit = parsePositiveInteger(values.limit, 10);
 
   if (!keyword) {
     throw new Error('Missing --keyword');
   }
 
-  const toc = await getRepoToc(page, repoInfo);
-  const pathMap = collectDocPaths(toc);
-  const docs = await listAllDocs(page, repoInfo);
+  const pathMap = collectDocPaths(repoState.toc);
+  const docs = await listAllDocs(session.page, repoState);
   const normalizedGroup = normalizeGroupPath(groupPath);
   const results = [];
 
@@ -620,8 +955,8 @@ async function searchNotesAction(page, repoInfo, options) {
     let excerpt = '';
 
     if (!titleMatch && searchInBody) {
-      const detail = await getDoc(page, repoInfo, item.id);
-      const body = String(detail.body || '');
+      const detail = await getDoc(session.page, repoState, item, { editable: true });
+      const body = extractSearchableBody(detail);
       bodyMatch = body.toLowerCase().includes(keyword.toLowerCase());
       if (bodyMatch) {
         excerpt = buildExcerpt(body, keyword);
@@ -648,19 +983,17 @@ async function searchNotesAction(page, repoInfo, options) {
   return results;
 }
 
-async function organizeNotesAction(page, repoInfo, options) {
-  await ensureRepoPage(page, repoInfo.repoUrl);
-  const keywordRules = parseKeywordRules(options['keyword-rules'], options['keyword-rules-file']);
-  const limit = Number(options.limit || 50);
-
-  const toc = await getRepoToc(page, repoInfo);
-  const pathMap = collectDocPaths(toc);
-  const docs = await listAllDocs(page, repoInfo);
+async function organizeNotesAction(session, values) {
+  const repoState = session.repoState;
+  const keywordRules = parseKeywordRules(values['keyword-rules'], values['keyword-rules-file']);
+  const limit = parsePositiveInteger(values.limit, 50);
+  const pathMap = collectDocPaths(repoState.toc);
+  const docs = await listAllDocs(session.page, repoState);
   const suggestions = [];
 
   for (const item of docs.slice(0, limit)) {
-    const detail = await getDoc(page, repoInfo, item.id);
-    const haystack = `${item.title || ''}\n${detail.body || ''}`.toLowerCase();
+    const detail = await getDoc(session.page, repoState, item, { editable: true });
+    const haystack = `${item.title || ''}\n${extractSearchableBody(detail)}`.toLowerCase();
     const currentPaths = (pathMap[String(item.id)] || []).map((value) => normalizeGroupPath(value));
 
     let suggestedGroup = '';
@@ -697,12 +1030,24 @@ async function organizeNotesAction(page, repoInfo, options) {
 
 function printHelp() {
   console.log(`Usage:
-  yuque_browser_cli.js inspect-session --repo-url <url> [--chrome-user-data-dir <dir>] [--chrome-profile-directory Default]
-  yuque_browser_cli.js get-toc --repo-url <url> [--chrome-user-data-dir <dir>] [--chrome-profile-directory Default]
-  yuque_browser_cli.js upsert-note --repo-url <url> --group-path <path> --doc-title <title> (--doc-body <text> | --doc-body-file <file>)
-  yuque_browser_cli.js append-note --repo-url <url> --group-path <path> --doc-title <title> (--content <text> | --content-file <file>)
-  yuque_browser_cli.js search-notes --repo-url <url> --keyword <text> [--group-path <path>] [--search-in-title true] [--search-in-body true]
-  yuque_browser_cli.js organize-notes --repo-url <url> (--keyword-rules <json> | --keyword-rules-file <file>)
+  yuque_browser_cli.js inspect-session --repo-url <url> [--storage-state-path <file>] [--ensure-login-if-missing true]
+  yuque_browser_cli.js get-toc --repo-url <url> [--storage-state-path <file>] [--ensure-login-if-missing true]
+  yuque_browser_cli.js upsert-note --repo-url <url> --group-path <path> --doc-title <title> (--doc-body <text> | --doc-body-file <file>) [--storage-state-path <file>]
+  yuque_browser_cli.js append-note --repo-url <url> --group-path <path> --doc-title <title> (--content <text> | --content-file <file>) [--storage-state-path <file>]
+  yuque_browser_cli.js search-notes --repo-url <url> --keyword <text> [--group-path <path>] [--storage-state-path <file>]
+  yuque_browser_cli.js organize-notes --repo-url <url> (--keyword-rules <json> | --keyword-rules-file <file>) [--storage-state-path <file>]
+
+StorageState-first options:
+  --storage-state-path <file>
+  --ensure-login-if-missing true|false
+  --login-timeout-seconds <n>
+  --username <value>
+  --password <value>
+
+Fallback real-profile options:
+  --chrome-user-data-dir <dir>
+  --chrome-profile-directory <name>
+  --channel <chrome|msedge>
 `);
 }
 
@@ -711,6 +1056,11 @@ async function main() {
     allowPositionals: true,
     options: {
       'repo-url': { type: 'string' },
+      'storage-state-path': { type: 'string' },
+      'ensure-login-if-missing': { type: 'string' },
+      'login-timeout-seconds': { type: 'string' },
+      username: { type: 'string' },
+      password: { type: 'string' },
       'chrome-user-data-dir': { type: 'string' },
       'chrome-profile-directory': { type: 'string' },
       channel: { type: 'string' },
@@ -743,30 +1093,29 @@ async function main() {
   }
 
   const repoInfo = parseRepoUrl(repoUrl);
-  const context = await launchContext(values);
-  const page = context.pages()[0] || (await context.newPage());
+  const session = await prepareSession(values, repoInfo);
 
   try {
     let result;
     if (action === 'inspect-session') {
-      result = await inspectSession(page, repoInfo);
+      result = await inspectSessionAction(session);
     } else if (action === 'get-toc') {
-      result = await getTocAction(page, repoInfo);
+      result = await getTocAction(session);
     } else if (action === 'upsert-note') {
-      result = await upsertNoteAction(page, repoInfo, values);
+      result = await upsertNoteAction(session, values);
     } else if (action === 'append-note') {
-      result = await appendNoteAction(page, repoInfo, values);
+      result = await appendNoteAction(session, values);
     } else if (action === 'search-notes') {
-      result = await searchNotesAction(page, repoInfo, values);
+      result = await searchNotesAction(session, values);
     } else if (action === 'organize-notes') {
-      result = await organizeNotesAction(page, repoInfo, values);
+      result = await organizeNotesAction(session, values);
     } else {
       throw new Error(`Unknown action: ${action}`);
     }
 
     console.log(JSON.stringify(result, null, 2));
   } finally {
-    await context.close();
+    await closeSession(session);
   }
 }
 
