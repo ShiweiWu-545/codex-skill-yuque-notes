@@ -16,29 +16,34 @@ Default to the browser workflow when the user does not want to use a Yuque API t
 3. If the storageState file does not exist or the repo redirects to `/login`, either:
    - run `node <skill-root>/scripts/yuque_storage_state_login.js --state-output <file> --repo-url <url>`, or
    - rerun the browser CLI with `--ensure-login-if-missing true` so it bootstraps the login interactively and saves the state file for later reuse.
-4. After the repo page is reachable, use `window.appData.book` on the real repo page to read `book_id` and `toc`, then route the request with [references/operations.md](references/operations.md).
-5. Only if the user explicitly wants the token-based path, locate the local MCP project. Check `./yuque-mcp-src` first. If it is missing, search for a folder containing `pyproject.toml`, `.env.example`, and `yuque_mcp/server.py`.
-6. Validate the local API setup before changing MCP config or running the server. Run `python <skill-root>/scripts/check_local_project.py --project-root <path>`.
-7. Read [references/mcp-setup.md](references/mcp-setup.md) only for the token-based path.
+4. After the first successful browser run on the current device, the CLI writes a local history record under `~/.codex/yuque-notes/session-history.json` so later calls can auto-reuse the last successful repo URL, workflow, and storageState path.
+5. After the repo page is reachable, use `window.appData.book` on the real repo page to read `book_id` and `toc`. If Playwright cannot launch because the browser executable is missing, fall back to parsing `window.appData` from the repo HTML through the saved `storageState` cookies, then route the request with [references/operations.md](references/operations.md).
+6. Only if the user explicitly wants the token-based path, locate the local MCP project. Check `./yuque-mcp-src` first. If it is missing, search for a folder containing `pyproject.toml`, `.env.example`, and `yuque_mcp/server.py`.
+7. Validate the local API setup before changing MCP config or running the server. Run `python <skill-root>/scripts/check_local_project.py --project-root <path>`.
+8. Read [references/mcp-setup.md](references/mcp-setup.md) only for the token-based path.
 
 ## Operating Rules
 
 - Prefer the storageState browser workflow when the user says to use Yuque through the logged-in browser and no API token is available.
 - If `--storage-state-path` is provided, reuse that file first.
+- If the current device already has a successful local history record, prefer loading that record before redoing the full browser-resolution flow.
 - If `--storage-state-path` is omitted and `--ensure-login-if-missing true` is enabled, the CLI derives a default path under `~/.codex/yuque-notes/storage-state/<group>__<book>.json`.
+- If `--repo-url` is omitted and a history record exists, the CLI may reuse the latest successful repo automatically.
 - If the storageState file is missing or expired, generate or refresh it through the manual-assisted login flow instead of retrying legacy browser endpoints.
 - In browser mode, read `book_id` and `toc` from the repo page, then use Yuque's real frontend `/api/docs` endpoints for list, create, and update.
+- If Playwright can load `playwright-core` but cannot launch a bundled browser executable, reuse the saved `storageState` cookies directly over HTTPS before asking to install browsers.
 - When creating a document directly inside a catalog node, use `insert_to_catalog=true`, `action=appendChild`, and `target_uuid=<catalog uuid>`.
 - Call `get-toc` before guessing a `group_path`.
 - Treat `group_path` as a slash-separated existing Yuque catalog path, for example `dev-tools` or `dev-tools/openai`.
 - If the target `group_path` does not exist in the TOC, stop guessing and create that catalog manually before writing the note.
 - Prefer `upsert-note` for most "record this note" requests in browser mode.
 - Use `append-note` only when the user wants incremental additions to an existing note.
+- Use `delete-note` only when the user explicitly asks to remove a note, and prefer `--doc-id` when duplicate titles are possible.
 - Use `search-notes` before creating a new note when title collisions are likely.
 - Treat `organize-notes` as a recommendation tool. It does not move documents on its own.
 - For large note bodies, write the content to a temp file and pass `--doc-body-file` or `--content-file`.
 - Treat the real Chrome profile route as a fallback only. Use it only when the user explicitly wants the real profile path and can close Chrome first.
-- If the browser workflow fails, report whether the issue was a missing storageState file, expired Yuque login, locked real profile, missing browser executable, or missing `playwright-core`.
+- If the browser workflow fails, report whether the issue was a missing storageState file, expired Yuque login, locked real profile, missing browser executable, missing `playwright-core`, or an HTTP fallback parse/request failure.
 - If the user asks for Codex MCP configuration, first confirm that they actually want the token-based path, then run `python <skill-root>/scripts/print_mcp_config.py --project-root <path>`.
 
 ## Quick Routing
@@ -47,6 +52,7 @@ Default to the browser workflow when the user does not want to use a Yuque API t
 - Inspect catalog structure in browser mode: `get-toc`
 - Record or overwrite a note in browser mode: `upsert-note`
 - Append a log or meeting note in browser mode: `append-note`
+- Delete a note in browser mode: `delete-note`
 - Search by keyword in browser mode: `search-notes`
 - Generate filing suggestions in browser mode: `organize-notes`
 - Record or overwrite a note in API mode: `upsert_yuque_note`

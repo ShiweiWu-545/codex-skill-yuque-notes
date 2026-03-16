@@ -13,11 +13,21 @@ Use the browser workflow when:
 The default browser route is:
 
 1. Reuse a saved Yuque `storageState` file.
-2. Open the real Yuque repo page with that state.
-3. Read `book_id` and `toc` from `window.appData.book`.
-4. Use Yuque's frontend `/api/docs` requests for listing, creating, and updating notes.
+2. Reuse a local history record from a previous successful run when one exists on the current device.
+3. Open the real Yuque repo page with that state.
+4. Read `book_id` and `toc` from `window.appData.book`.
+5. Use Yuque's frontend `/api/docs` requests for listing, creating, and updating notes.
 
 This avoids depending on the user's live Chrome profile for normal note operations.
+
+If Playwright cannot launch because the bundled browser executable is missing, the CLI should fall back to direct HTTPS requests with the saved `storageState` cookies:
+
+1. Request the real repo page with the cookies from the `storageState` file.
+2. Parse `window.appData = JSON.parse(decodeURIComponent(...))` from the returned HTML.
+3. Read `book_id`, `toc`, and `login` from that parsed payload.
+4. Reuse the same cookies against Yuque frontend `/api/docs` endpoints.
+
+Use this fallback before telling the user to install Playwright browsers.
 
 ## First Login And State Capture
 
@@ -47,12 +57,26 @@ If `--storage-state-path` is omitted and `--ensure-login-if-missing true` is set
 ~/.codex/yuque-notes/storage-state/<group>__<book>.json
 ```
 
+After the first success, the CLI also stores the successful repo URL, workflow, and reusable path info under:
+
+```text
+~/.codex/yuque-notes/session-history.json
+```
+
+That allows later calls on the same device to omit `--repo-url` and often omit `--storage-state-path`.
+
 ## Reuse A Saved State
 
 Inspect the session:
 
 ```bash
 node <skill-root>/scripts/yuque_browser_cli.js inspect-session --repo-url <repo-url> --storage-state-path <state-file>
+```
+
+Reuse the last successful route on the same device:
+
+```bash
+node <skill-root>/scripts/yuque_browser_cli.js inspect-session --use-history true
 ```
 
 Read the TOC:
@@ -73,10 +97,28 @@ Append content:
 node <skill-root>/scripts/yuque_browser_cli.js append-note --repo-url <repo-url> --storage-state-path <state-file> --group-path "dev-tools" --doc-title "debug" --content-file <path-to-markdown>
 ```
 
+Delete a note:
+
+```bash
+node <skill-root>/scripts/yuque_browser_cli.js delete-note --repo-url <repo-url> --storage-state-path <state-file> --group-path "dev-tools" --doc-title "debug"
+```
+
+Or delete by exact doc ID:
+
+```bash
+node <skill-root>/scripts/yuque_browser_cli.js delete-note --repo-url <repo-url> --storage-state-path <state-file> --doc-id 123456
+```
+
 Search notes:
 
 ```bash
 node <skill-root>/scripts/yuque_browser_cli.js search-notes --repo-url <repo-url> --storage-state-path <state-file> --keyword "OpenAI" --search-in-title true --search-in-body true
+```
+
+If you want to isolate or test history behavior, point the CLI at a custom history file:
+
+```bash
+node <skill-root>/scripts/yuque_browser_cli.js get-toc --repo-url <repo-url> --storage-state-path <state-file> --history-file <path-to-history.json>
 ```
 
 ## Refresh An Expired State
@@ -128,4 +170,5 @@ That is a normal automation startup state, not a Yuque error.
 - If the state file is missing, create it with `yuque_storage_state_login.js` or rerun the CLI with `--ensure-login-if-missing true`.
 - If the repo redirects to `/login`, the saved state has expired or is invalid.
 - If Node cannot resolve `playwright-core`, run `npm install --omit=dev` in the installed skill directory.
+- If Playwright is installed but the browser executable is missing, prefer the storageState-cookie HTTPS fallback before asking for `npx playwright install`.
 - If the real-profile fallback reports a profile lock problem, close all Chrome windows and retry.

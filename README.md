@@ -88,6 +88,10 @@ inside the installed skill directory, so `playwright-core` is available for the 
 
 This path does not require a Yuque API token.
 
+When a valid `storageState` already exists, the CLI can now fall back to direct HTTPS requests with the saved Yuque cookies if Playwright cannot launch a bundled browser executable. That removes the need to stop and install Playwright browsers for common read/write note operations.
+
+After the first successful run on a device, the CLI also saves a local session history record so later calls can directly reuse the last successful repo URL, workflow, and `storageState` path.
+
 ### First-Time Login
 
 Create a reusable storageState file:
@@ -116,10 +120,22 @@ Inspect the repo session:
 node .\skill\scripts\yuque_browser_cli.js inspect-session --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json
 ```
 
+Reuse the last successful route directly:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js inspect-session --use-history true
+```
+
 Read the TOC:
 
 ```powershell
 node .\skill\scripts\yuque_browser_cli.js get-toc --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json
+```
+
+Or load the last successful repo and path from local history:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js get-toc --use-history true
 ```
 
 Upsert a note:
@@ -132,6 +148,18 @@ Append to a note:
 
 ```powershell
 node .\skill\scripts\yuque_browser_cli.js append-note --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json --group-path "dev-tools" --doc-title "debug" --content-file .\append.md
+```
+
+Delete a note by exact catalog path and title:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js delete-note --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json --group-path "dev-tools" --doc-title "debug"
+```
+
+Delete a note by exact doc ID:
+
+```powershell
+node .\skill\scripts\yuque_browser_cli.js delete-note --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json --doc-id 123456
 ```
 
 ### Refresh An Expired State

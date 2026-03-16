@@ -6,6 +6,7 @@ Map note-management intents to the browser CLI when the user wants the Yuque web
 
 - record or overwrite a note: `upsert-note`
 - append to an existing note: `append-note`
+- delete an existing note: `delete-note`
 - search notes: `search-notes`
 - inspect the repo catalog: `get-toc`
 - generate filing suggestions: `organize-notes`
@@ -70,6 +71,26 @@ Behavior:
 
 - appends to the matching note in the exact target `group_path`
 - creates a new note in that `group_path` if no exact match exists there yet
+
+### `delete-note`
+
+Use for:
+
+- deleting a note that is known to be obsolete
+- removing a note by exact catalog path and title
+- removing a note by exact `doc_id` when title collisions are possible
+
+Inputs:
+
+- `doc_id`, or
+- `group_path`
+- `doc_title`
+
+Behavior:
+
+- deletes the exact note when `doc_id` is provided
+- deletes the matching note only when the same title exists in the exact target `group_path`
+- stops and asks for `doc_id` if multiple exact matches are found
 
 ## Search And Discovery
 
