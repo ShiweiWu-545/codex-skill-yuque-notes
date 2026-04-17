@@ -3,6 +3,8 @@
 
 const fs = require('fs');
 const https = require('https');
+const os = require('os');
+const path = require('path');
 const { parseArgs } = require('node:util');
 
 const { chromium } = require('playwright-core');
@@ -811,6 +813,148 @@ function stripHtml(value) {
   );
 }
 
+function sanitizeFileComponent(value, fallback = 'untitled') {
+  const sanitized = String(value || '')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '');
+  return sanitized || fallback;
+}
+
+function buildTimestampToken(date = new Date()) {
+  return date.toISOString().replace(/[:.]/g, '-');
+}
+
+function ensureDirectory(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+  return dirPath;
+}
+
+function resolveLocalDraftRoot(values) {
+  return expandPath(values['local-draft-dir'] || '~/.codex/yuque-notes/local-drafts');
+}
+
+function normalizeMarkdownSpacing(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function htmlToMarkdown(value) {
+  let text = String(value || '');
+  if (!text.trim()) {
+    return '';
+  }
+
+  text = text
+    .replace(/<!doctype[^>]*>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi, (_, code) =>
+      `\n\n\`\`\`\n${decodeHtmlEntities(code).trim()}\n\`\`\`\n\n`,
+    )
+    .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level, content) => {
+      const heading = stripHtml(content);
+      return `\n\n${'#'.repeat(Number(level))} ${heading}\n\n`;
+    })
+    .replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, content) => {
+      const lines = stripHtml(content)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => `> ${line}`)
+        .join('\n');
+      return `\n\n${lines}\n\n`;
+    })
+    .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_, content) => `\n- ${stripHtml(content)}`)
+    .replace(/<(ul|ol)[^>]*>/gi, '\n')
+    .replace(/<\/(ul|ol)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n\n')
+    .replace(/<p[^>]*>/gi, '')
+    .replace(/<div[^>]*>/gi, '')
+    .replace(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
+      const textLabel = stripHtml(label) || href;
+      return `[${textLabel}](${href})`;
+    })
+    .replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, (_, _tag, content) => `**${stripHtml(content)}**`)
+    .replace(/<(em|i)[^>]*>([\s\S]*?)<\/\1>/gi, (_, _tag, content) => `*${stripHtml(content)}*`)
+    .replace(/<[^>]+>/g, ' ');
+
+  return normalizeMarkdownSpacing(decodeHtmlEntities(text));
+}
+
+function extractDocMarkdown(detail) {
+  const markdownCandidates = [detail.body, detail.body_draft, detail.content];
+  for (const candidate of markdownCandidates) {
+    if (typeof candidate !== 'string' || !candidate.trim()) {
+      continue;
+    }
+    if (!/<[^>]+>/.test(candidate) && !candidate.startsWith('<!doctype')) {
+      return normalizeMarkdownSpacing(candidate);
+    }
+  }
+
+  const richCandidates = [detail.body, detail.body_draft, detail.body_asl, detail.content];
+  for (const candidate of richCandidates) {
+    if (typeof candidate !== 'string' || !candidate.trim()) {
+      continue;
+    }
+    const converted = htmlToMarkdown(candidate);
+    if (converted) {
+      return converted;
+    }
+  }
+
+  return '';
+}
+
+function writeLocalDraftFile(targetDir, prefix, content) {
+  ensureDirectory(targetDir);
+  const filePath = path.join(targetDir, `${prefix}.md`);
+  fs.writeFileSync(filePath, String(content || ''), 'utf8');
+  return filePath;
+}
+
+async function prepareLocalMarkdownWorkspace(session, repoState, docRef, values, groupPath) {
+  const detail = await getDoc(session, repoState, docRef, { editable: true });
+  const currentMarkdown = extractDocMarkdown(detail);
+  const rootDir = resolveLocalDraftRoot(values);
+  const repoDir = sanitizeFileComponent(repoState.book_slug || String(repoState.book_id || 'repo'));
+  const groupDir = sanitizeFileComponent(groupPath || 'root');
+  const docDir = sanitizeFileComponent(
+    `${detail.title || docRef.title || 'note'}__${detail.id || docRef.id || 'doc'}`,
+  );
+  const targetDir = path.join(rootDir, repoDir, groupDir, docDir);
+  const stamp = buildTimestampToken();
+  const originalPath = writeLocalDraftFile(targetDir, `${stamp}__original`, currentMarkdown);
+
+  return {
+    detail,
+    currentMarkdown,
+    targetDir,
+    originalPath,
+    stamp,
+    source_format: detail.format || detail.origin_format || (/<[^>]+>/.test(detail.body || '') ? 'lake' : 'markdown'),
+  };
+}
+
+function buildAppendedMarkdown(currentMarkdown, content, separator) {
+  const existing = normalizeMarkdownSpacing(currentMarkdown);
+  const addition = normalizeMarkdownSpacing(content);
+  if (!existing) {
+    return addition;
+  }
+  if (!addition) {
+    return existing;
+  }
+  return `${existing}${separator || '\n\n'}${addition}`;
+}
+
 function buildLakeTextNode(text) {
   return `<span class="ne-text">${escapeHtml(text)}</span>`;
 }
@@ -888,6 +1032,52 @@ function appendLakeBody(existingBody, markdown) {
     return `${current.slice(0, closingIndex)}${fragment}${current.slice(closingIndex)}`;
   }
   return `${current}${fragment}`;
+}
+
+function buildDocUrl(repoUrl, docRef) {
+  const slugOrId = String(docRef?.slug || docRef?.id || '').trim();
+  if (!slugOrId) {
+    throw new Error('Missing document slug or id for browser editor navigation.');
+  }
+  return new URL(slugOrId, `${String(repoUrl || '').replace(/\/+$/, '')}/`).toString();
+}
+
+async function appendLakeNoteInEditor(session, repoState, docRef, content) {
+  if (!session.page) {
+    throw new Error(
+      'Lake notes require a real browser editor session for append-note. Retry with a reusable storageState or Chrome profile instead of the HTTP-cookie fallback.',
+    );
+  }
+
+  const docUrl = buildDocUrl(repoState.repo_url, docRef);
+  const page = session.page;
+  await page.goto(docUrl, { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(2500);
+
+  const editButton = page.getByRole('button', { name: '编辑' }).first();
+  await editButton.waitFor({ state: 'visible', timeout: 20000 });
+  await editButton.click();
+
+  const editor = page.locator('[contenteditable="true"]').first();
+  await editor.waitFor({ state: 'visible', timeout: 20000 });
+  await page.waitForTimeout(2000);
+
+  await editor.click();
+  const endShortcut = os.platform() === 'darwin' ? 'Meta+End' : 'Control+End';
+  await editor.press(endShortcut).catch(() => {});
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+  await page.keyboard.insertText(content);
+
+  const updateButton = page.getByRole('button', { name: '更新' }).first();
+  await updateButton.waitFor({ state: 'visible', timeout: 20000 });
+  await updateButton.click();
+  await page.waitForTimeout(4000);
+
+  return {
+    ok: true,
+    doc_url: docUrl,
+  };
 }
 
 function extractSearchableBody(detail) {
@@ -1212,15 +1402,32 @@ async function upsertNoteAction(session, values) {
     };
   }
 
+  const workspace = await prepareLocalMarkdownWorkspace(
+    session,
+    repoState,
+    existing,
+    values,
+    targetGroup.path,
+  );
+  const modifiedPath = writeLocalDraftFile(
+    workspace.targetDir,
+    `${workspace.stamp}__modified`,
+    docBody,
+  );
   const updated = await updateDoc(session, repoState, existing.id, {
     title: docTitle,
     body: docBody,
+    format: 'markdown',
   });
   return {
     ...buildSessionMetadata(session, repoState),
     action: 'updated',
     group: targetGroup,
     doc: updated || existing,
+    backup_strategy: 'local-markdown-roundtrip',
+    local_backup_path: workspace.originalPath,
+    local_modified_path: modifiedPath,
+    source_format: workspace.source_format,
   };
 }
 
@@ -1249,18 +1456,22 @@ async function appendNoteAction(session, values) {
     };
   }
 
-  const detail = await getDoc(session, repoState, existing, { editable: true });
-  const currentBody = detail.body || '';
-  const usesLakeFormat =
-    detail.format === 'lake' || detail.origin_format === 'lake' || /<[^>]+>/.test(currentBody);
-  const nextBody = usesLakeFormat
-    ? appendLakeBody(currentBody, content)
-    : currentBody
-      ? `${currentBody}${separator}${content}`
-      : content;
+  const workspace = await prepareLocalMarkdownWorkspace(
+    session,
+    repoState,
+    existing,
+    values,
+    targetGroup.path,
+  );
+  const nextBody = buildAppendedMarkdown(workspace.currentMarkdown, content, separator);
+  const modifiedPath = writeLocalDraftFile(
+    workspace.targetDir,
+    `${workspace.stamp}__modified`,
+    nextBody,
+  );
   const updated = await updateDoc(session, repoState, existing.id, {
     body: nextBody,
-    format: usesLakeFormat ? 'lake' : 'markdown',
+    format: 'markdown',
   });
 
   return {
@@ -1268,8 +1479,13 @@ async function appendNoteAction(session, values) {
     action: 'appended',
     group: targetGroup,
     doc: updated || existing,
-    previous_length: currentBody.length,
+    previous_length: workspace.currentMarkdown.length,
     new_length: nextBody.length,
+    publish_workflow: 'frontend-api-overwrite',
+    backup_strategy: 'local-markdown-roundtrip',
+    local_backup_path: workspace.originalPath,
+    local_modified_path: modifiedPath,
+    source_format: workspace.source_format,
   };
 }
 
@@ -1456,6 +1672,7 @@ StorageState-first options:
   --storage-state-path <file>
   --ensure-login-if-missing true|false
   --login-timeout-seconds <n>
+  --local-draft-dir <dir>
   --username <value>
   --password <value>
 
@@ -1478,6 +1695,7 @@ async function main() {
       'storage-state-path': { type: 'string' },
       'ensure-login-if-missing': { type: 'string' },
       'login-timeout-seconds': { type: 'string' },
+      'local-draft-dir': { type: 'string' },
       username: { type: 'string' },
       password: { type: 'string' },
       'use-history': { type: 'string' },

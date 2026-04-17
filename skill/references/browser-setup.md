@@ -97,6 +97,26 @@ Append content:
 node <skill-root>/scripts/yuque_browser_cli.js append-note --repo-url <repo-url> --storage-state-path <state-file> --group-path "dev-tools" --doc-title "debug" --content-file <path-to-markdown>
 ```
 
+For any existing note modification, the CLI now uses a local Markdown round-trip:
+
+1. export the current Yuque note to a local Markdown draft
+2. modify that local Markdown
+3. overwrite the full Yuque note with the modified Markdown
+
+This applies to both `append-note` and `upsert-note` when the target note already exists, including notes that were originally Lake-format.
+
+The default local draft directory is:
+
+```text
+~/.codex/yuque-notes/local-drafts/
+```
+
+Override it with:
+
+```bash
+--local-draft-dir <dir>
+```
+
 Delete a note:
 
 ```bash

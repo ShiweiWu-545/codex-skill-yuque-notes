@@ -92,6 +92,8 @@ When a valid `storageState` already exists, the CLI can now fall back to direct 
 
 After the first successful run on a device, the CLI also saves a local session history record so later calls can directly reuse the last successful repo URL, workflow, and `storageState` path.
 
+For existing-note modifications, the CLI also saves a local original Markdown draft and a local modified Markdown draft before overwriting the note in Yuque. This gives you a much more reliable rollback path when note bodies are complex.
+
 ### First-Time Login
 
 Create a reusable storageState file:
@@ -148,6 +150,26 @@ Append to a note:
 
 ```powershell
 node .\skill\scripts\yuque_browser_cli.js append-note --repo-url <repo-url> --storage-state-path .\.cache\yuque-state.json --group-path "dev-tools" --doc-title "debug" --content-file .\append.md
+```
+
+For any existing note update, the CLI now uses a backup-first local Markdown workflow:
+
+- export the current Yuque note to a local Markdown draft
+- modify that local draft
+- overwrite the full Yuque note with the modified Markdown
+
+This applies to both `append-note` and `upsert-note` when the target note already exists, including notes that were originally created in Lake format.
+
+By default, local drafts are stored under:
+
+```text
+~/.codex/yuque-notes/local-drafts/
+```
+
+Override the local draft workspace with:
+
+```powershell
+--local-draft-dir <dir>
 ```
 
 Delete a note by exact catalog path and title:

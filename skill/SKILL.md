@@ -38,6 +38,9 @@ Default to the browser workflow when the user does not want to use a Yuque API t
 - If the target `group_path` does not exist in the TOC, stop guessing and create that catalog manually before writing the note.
 - Prefer `upsert-note` for most "record this note" requests in browser mode.
 - Use `append-note` only when the user wants incremental additions to an existing note.
+- For any modification to an existing note, first export the current note to a local Markdown draft, then edit that local file, and finally overwrite the full note with the modified Markdown.
+- The default local draft workspace is `~/.codex/yuque-notes/local-drafts/`. Override it with `--local-draft-dir <dir>` when needed.
+- This backup-first flow applies to both `append-note` and `upsert-note` when the target note already exists, including notes that were originally Lake-format.
 - Use `delete-note` only when the user explicitly asks to remove a note, and prefer `--doc-id` when duplicate titles are possible.
 - Use `search-notes` before creating a new note when title collisions are likely.
 - Treat `organize-notes` as a recommendation tool. It does not move documents on its own.
@@ -65,4 +68,5 @@ Default to the browser workflow when the user does not want to use a Yuque API t
 - When using browser mode, report the repo URL, chosen subcommand, and either the storageState path or the real Chrome profile directory.
 - When setting up API mode, provide the exact server command and required env keys.
 - When writing notes, report the resolved `group_path` and chosen workflow.
+- When modifying existing notes, also report the local original-draft path and modified-draft path.
 - When troubleshooting, report whether the issue is missing browser dependencies, missing or expired storageState, login redirect, locked Chrome profile, missing files, or missing env keys.

@@ -50,6 +50,7 @@ Inputs:
 Behavior:
 
 - updates the matching note only when the same title already exists in the exact target `group_path`
+- before updating an existing note, exports the current note to a local Markdown draft, writes the new Markdown locally, then overwrites the full note from that modified Markdown
 - creates a new note in the target `group_path` when the same title only exists elsewhere
 - writes the new note directly into the target catalog during creation
 
@@ -71,6 +72,9 @@ Behavior:
 
 - appends to the matching note in the exact target `group_path`
 - creates a new note in that `group_path` if no exact match exists there yet
+- before appending to an existing note, exports the current note to a local Markdown draft
+- appends in the local Markdown file first, then overwrites the full Yuque note with the modified Markdown
+- this same backup-first flow is used for notes that originally came from Lake format, to avoid partial append failures
 
 ### `delete-note`
 
